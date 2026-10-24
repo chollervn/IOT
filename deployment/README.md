@@ -1,0 +1,11 @@
+# Triển khai local
+
+Các script Windows và cấu hình sinh tự động nằm trong [`mqtt/`](../mqtt/README.md).
+Mosquitto 2.1.2 portable được tải từ trang chính thức và bật plugin Dynamic Security.
+Backend dùng tài khoản dịch vụ receiver; broker_admin chỉ được backend sử dụng để quản trị quyền MQTT.
+Thiết bị dùng username/password riêng, ACL chỉ cho phép gửi telemetry/ACK/status của chính nó và nhận command của chính nó.
+
+Chạy Setup để sinh secret/config, Start-IOT để chạy nền, Monitor để xem, Stop-IOT để dừng.
+Không cần cài service hệ thống. Firewall chỉ mở cổng MQTT cho executable của dự án từ LocalSubnet.
+Nếu đổi IP máy tính: dừng dịch vụ, Setup lại, nạp lại ESP32 và cập nhật firewall.
+Môi trường này chưa dùng Docker, TLS hoặc cloud; không mở cổng trực tiếp ra Internet.

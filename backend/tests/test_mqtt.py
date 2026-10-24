@@ -1,0 +1,63 @@
+import json
+from types import SimpleNamespace
+import pytest
+from app.mqtt_receiver import MqttReceiver, parse_message
+
+
+def payload(**changes):
+    item = {"device_id": "esp32_01", "uptime_s": 10, "do": 0, "detected": True}
+    item.update(changes)
+    return json.dumps(item).encode()
+
+
+@pytest.mark.parametrize("level,detected", [(0, True), (1, False)])
+def test_both_sensor_levels(level, detected):
+    item = parse_message("iot/esp32_01/lm393", payload(do=level, detected=detected))
+    assert item.detected is detected
+
+
+@pytest.mark.parametrize("topic,data", [
+    ("iot/other/lm393", payload()),
+    ("iot/simulator/lm393", payload()),
+    ("iot/esp32_01/lm393", payload(detected=False)),
+    ("iot/esp32_01/lm393", payload(do=2)),
+    ("iot/esp32_01/lm393", payload(do=True)),
+    ("iot/esp32_01/lm393", payload(uptime_s=-1)),
+    ("iot/esp32_01/lm393", payload(uptime_s=2**80)),
+    ("iot/esp32_01/lm393", payload(do2=0)),
+    ("iot/esp32_01/lm393", payload(detected2=True)),
+    ("iot/esp32_01/lm393", payload(do2=0, detected2=False)),
+    ("iot/esp32_01/lm393", payload(do2=True, detected2=False)),
+    ("iot/esp32_01/lm393", b"not-json"),
+    ("iot/esp32_01/lm393", b"x" * 1025),
+])
+def test_invalid_readings_rejected(topic, data):
+    with pytest.raises(ValueError):
+        parse_message(topic, data)
+
+
+def test_retained_readings_are_not_recorded_as_live():
+    recorded = []
+    receiver = MqttReceiver(lambda item, stamp: recorded.append(item), username="test", password="test")
+    message = SimpleNamespace(topic="iot/esp32_01/lm393", payload=payload(), retain=True)
+    receiver._on_message(None, None, message)
+    assert not recorded
+    message.retain = False
+    receiver._on_message(None, None, message)
+    assert len(recorded) == 1
+
+
+def test_storage_error_does_not_kill_receiver():
+    def fail(item, stamp):
+        raise RuntimeError("Storage unavailable")
+    receiver = MqttReceiver(fail, username="test", password="test")
+    receiver._on_message(None, None, SimpleNamespace(
+        topic="iot/esp32_01/lm393", payload=payload(), retain=False))
+
+
+@pytest.mark.parametrize("level1,level2", [(0, 0), (0, 1), (1, 0), (1, 1)])
+def test_two_sensors_are_independent(level1, level2):
+    item = parse_message("iot/esp32_01/lm393", payload(
+        do=level1, detected=level1 == 0, do2=level2, detected2=level2 == 0))
+    assert item.detected == (level1 == 0)
+    assert item.detected2 == (level2 == 0)
