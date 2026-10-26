@@ -1,3 +1,4 @@
+param([switch]$BrokerOnly)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $taskRuntime = Join-Path $PSScriptRoot 'runtime'
@@ -35,12 +36,16 @@ if (-not $taskSaved.ContainsKey('broker')) {
     Start-Sleep -Milliseconds 700
     if ($taskBrokerProcess.HasExited) { throw 'Broker failed. Read mqtt/runtime/broker.stderr.log.' }
 }
+if ($BrokerOnly) {
+    Write-Host ("MQTT broker ready: {0}:{1}" -f $taskConnection.host, $taskConnection.port)
+    return
+}
 if (-not $taskSaved.ContainsKey('backend')) {
     if (Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue) {
         throw 'Port 8000 is already in use by another process.'
     }
     $taskBackendProcess = Start-Process -FilePath $taskPython `
-        -ArgumentList @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000',
+        -ArgumentList @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000', '--no-access-log',
             '--env-file', ('"' + (Join-Path $taskRuntime 'backend.env') + '"')) `
         -WorkingDirectory (Join-Path $taskRoot 'backend') -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $taskRuntime 'backend.stdout.log') `
@@ -59,6 +64,7 @@ for ($taskAttempt = 0; $taskAttempt -lt 30; $taskAttempt++) {
 if (-not $taskReady) { throw 'Backend/MQTT not ready. Read mqtt/runtime/backend.stderr.log.' }
 $taskConnection = Get-Content -LiteralPath (Join-Path $taskRuntime 'connection.json') -Raw | ConvertFrom-Json
 Write-Host ("MQTT ready: {0}:{1}" -f $taskConnection.host, $taskConnection.port)
-Write-Host 'Backend ready: http://127.0.0.1:8000/docs'
+Write-Host 'Dashboard ready: http://127.0.0.1:8000/'
+Write-Host 'API documentation: http://127.0.0.1:8000/docs'
 Write-Host 'Receive live readings: .\mqtt\Monitor.ps1'
 Write-Host 'Credentials: mqtt/runtime/THONG_TIN_DANG_NHAP.txt'

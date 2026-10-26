@@ -4,8 +4,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 from app import main as M
+from app.coordination import serialized
 from app.domain import (AlertDetails, DeviceBoot, DeviceCommand, DeviceDetails, DeviceGrant,
-                        DeviceSlot, ParkingEvent, SeenPacket)
+                        DeviceSlot, LiveTelemetry, ParkingEvent, SeenPacket)
 
 log = logging.getLogger(__name__)
 TERMINAL = {"acknowledged", "failed", "timed_out", "cancelled"}
@@ -77,12 +78,14 @@ def seed_physical(db):
             db.add(DeviceSlot(slot_name=name, device_id=device.id, gpio=gpio))
 
 
+@serialized
 def persist_reading(item, received_at):
+    from app.storage import save_packet
+    received_at = utc(received_at)
     with M.Sessions() as db:
         device = db.scalar(select(M.Device).where(M.Device.code == item.device_id))
         simulated = item.device_id == "simulator"
-        info = None
-        previous_seen = None
+        info, previous_seen = None, None
         if not simulated:
             if not device or device.status not in {"active", "provisioned", "maintenance"}:
                 log.warning("Ignored telemetry from an unregistered or disabled device")
@@ -92,10 +95,8 @@ def persist_reading(item, received_at):
                 return False
             previous_seen = utc(info.last_seen)
         if item.boot_id is not None:
-            packet_key = (item.device_id, item.boot_id, item.seq)
-            if db.get(SeenPacket, packet_key):
-                return False
             if info:
+                # The per-device watermark replaces an unbounded row per packet.
                 if info.last_boot_id == item.boot_id and info.last_seq is not None and item.seq <= info.last_seq:
                     return False
                 if info.last_boot_id != item.boot_id:
@@ -103,21 +104,26 @@ def persist_reading(item, received_at):
                         return False
                     db.add(DeviceBoot(device_id=device.id, boot_id=item.boot_id))
                 info.last_boot_id, info.last_seq = item.boot_id, item.seq
-            db.add(SeenPacket(device_code=item.device_id, boot_id=item.boot_id, seq=item.seq, received_at=received_at))
-        reading = M.Telemetry(device_code=item.device_id, uptime_s=item.uptime_s,
-                              do_level=item.do, detected=item.detected, received_at=received_at)
-        db.add(reading)
-        db.flush()
+            else:
+                packet_key = (item.device_id, item.boot_id, item.seq)
+                if db.get(SeenPacket, packet_key):
+                    return False
+                db.add(SeenPacket(device_code=item.device_id, boot_id=item.boot_id,
+                                  seq=item.seq, received_at=received_at))
+        timeout = max(info.offline_timeout_s, info.report_interval_ms * 3 / 1000) if info else 10
+        live = db.get(LiveTelemetry, item.device_id)
+        gap = previous_seen is None or (received_at - previous_seen).total_seconds() >= timeout or bool(info and info.forced_offline) or bool(live and live.invalidated_at)
+        if info and item.report_interval_ms is not None:
+            info.report_interval_ms = item.report_interval_ms
+        if not save_packet(db, device, item, received_at, info, gap):
+            return False
         levels = [("P1", item.do, item.detected)]
         if item.do2 is not None:
             levels.append(("P2", item.do2, item.detected2))
         for name, level, occupied in levels:
-            db.add(M.TelemetrySlot(telemetry_id=reading.id, slot_name=name, do_level=level, occupied=occupied))
             assignment = db.get(DeviceSlot, name)
             if not simulated and assignment and assignment.device_id == device.id and device.status == "active":
                 slot = db.scalar(select(M.Slot).where(M.Slot.name == name))
-                gap = previous_seen is None or (received_at - previous_seen).total_seconds() >= max(
-                    info.offline_timeout_s, info.report_interval_ms * 3 / 1000)
                 if slot and (gap or slot.occupied != occupied):
                     db.add(ParkingEvent(device_id=device.id, slot_name=name,
                         kind="initial" if previous_seen is None else ("after_gap" if gap else ("occupied" if occupied else "available")),
@@ -130,8 +136,6 @@ def persist_reading(item, received_at):
                 device.firmware = item.firmware
             if item.hardware:
                 info.hardware = item.hardware
-            if item.report_interval_ms is not None:
-                info.report_interval_ms = item.report_interval_ms
         try:
             db.commit()
         except IntegrityError:
@@ -153,17 +157,26 @@ def slot_views(db, user=None):
         stamp = None
         if device:
             info = db.get(DeviceDetails, device.id)
-            sample = db.execute(select(M.TelemetrySlot, M.Telemetry).join(M.Telemetry,
-                M.TelemetrySlot.telemetry_id == M.Telemetry.id).where(
-                    M.TelemetrySlot.slot_name == slot.name, M.Telemetry.device_code == device.code)
-                .order_by(M.Telemetry.id.desc()).limit(1)).first()
-            if sample:
+            live = db.get(LiveTelemetry, device.code)
+            if not live:
+                sample = db.execute(select(M.TelemetrySlot, M.Telemetry).join(M.Telemetry,
+                    M.TelemetrySlot.telemetry_id == M.Telemetry.id).where(
+                        M.TelemetrySlot.slot_name == slot.name, M.Telemetry.device_code == device.code)
+                    .order_by(M.Telemetry.id.desc()).limit(1)).first()
+            current = next((s for s in live.levels if s["name"] == slot.name), None) if live else None
+            if live:
+                stamp = utc(live.received_at)
+                fresh = (current is not None and live.operational and live.invalidated_at is None
+                         and device.status == "active" and connectivity(device, info) == "online"
+                         and stamp <= M.now() < utc(live.expires_at))
+            elif sample:
                 stamp = utc(sample[1].received_at)
                 timeout = max(info.offline_timeout_s, info.report_interval_ms * 3 / 1000) if info else 5
                 fresh = (device.status == "active" and connectivity(device, info) == "online"
                          and 0 <= (M.now() - stamp).total_seconds() < timeout)
+        occupied = current["occupied"] if device and live and current else (sample[0].occupied if sample else None)
         values.append({"id": slot.id, "name": slot.name, "device_id": device.id if device else None,
-            "occupied": sample[0].occupied if sample and fresh else None,
+            "occupied": occupied if fresh else None,
             "gpio": assignment.gpio if assignment else None, "fresh": bool(fresh),
             "updated_at": stamp.isoformat() if stamp else None})
     return values
@@ -181,6 +194,7 @@ def set_alert(db, device, kind, active, message):
         meta.active_key, meta.resolved_at = None, M.now()
 
 
+@serialized
 def acknowledge_command(item, received_at):
     with M.Sessions() as db:
         device = db.scalar(select(M.Device).where(M.Device.code == item.device_id))
@@ -206,6 +220,7 @@ def acknowledge_command(item, received_at):
         db.commit()
 
 
+@serialized
 def receive_status(item, received_at):
     with M.Sessions() as db:
         device = db.scalar(select(M.Device).where(M.Device.code == item.device_id))
@@ -216,12 +231,15 @@ def receive_status(item, received_at):
         if item.boot_id and info.last_boot_id and item.boot_id != info.last_boot_id:
             return
         if item.state == "offline":
+            from app.storage import invalidate
+            invalidate(db, device, received_at)
             info.forced_offline = True
         else:
             info.last_seen, info.forced_offline = received_at, False
         db.commit()
 
 
+@serialized
 def runtime_tick():
     to_publish = []
     with M.Sessions() as db:
@@ -229,6 +247,9 @@ def runtime_tick():
             info = details(db, device)
             state = connectivity(device, info)
             if state != info.connection_state:
+                if state != "online":
+                    from app.storage import invalidate
+                    invalidate(db, device, M.now())
                 if info.connection_state == "online" and state != "online":
                     for assignment in db.scalars(select(DeviceSlot).where(DeviceSlot.device_id == device.id)):
                         db.add(ParkingEvent(device_id=device.id, slot_name=assignment.slot_name,
@@ -257,6 +278,8 @@ def runtime_tick():
                 to_publish.append((device.code, {"command_id": command.id, "action": command.action,
                     "arguments": command.arguments, "expires_unix": int(utc(command.expires_at).timestamp()),
                     "boot_id": command.target_boot_id, "uptime_deadline_s": command.uptime_deadline_s}))
+        from app.storage import maintain
+        maintain(db, M.now())
         try:
             db.commit()
         except IntegrityError:

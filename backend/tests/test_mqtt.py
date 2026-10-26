@@ -1,4 +1,6 @@
 import json
+import logging
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import pytest
 from app.mqtt_receiver import MqttReceiver, parse_message
@@ -53,6 +55,19 @@ def test_storage_error_does_not_kill_receiver():
     receiver = MqttReceiver(fail, username="test", password="test")
     receiver._on_message(None, None, SimpleNamespace(
         topic="iot/esp32_01/lm393", payload=payload(), retain=False))
+
+
+def test_console_logs_changes_and_checkpoints_instead_of_every_heartbeat(monkeypatch, caplog):
+    from app import mqtt_receiver as module
+    start = datetime.now(timezone.utc)
+    stamps = iter([start, start + timedelta(seconds=1), start + timedelta(seconds=2), start + timedelta(seconds=63)])
+    monkeypatch.setattr(module, "datetime", SimpleNamespace(now=lambda tz: next(stamps)))
+    receiver = MqttReceiver(lambda item, stamp: True, username="test", password="test")
+    with caplog.at_level(logging.INFO, logger="app.mqtt_receiver"):
+        for level in (1, 1, 0, 0):
+            receiver._on_message(None, None, SimpleNamespace(topic="iot/esp32_01/lm393",
+                payload=payload(do=level, detected=level == 0), retain=False))
+    assert len([r for r in caplog.records if r.name == "app.mqtt_receiver" and r.levelno == logging.INFO]) == 3
 
 
 @pytest.mark.parametrize("level1,level2", [(0, 0), (0, 1), (1, 0), (1, 1)])

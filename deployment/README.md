@@ -6,6 +6,8 @@ Backend dùng tài khoản dịch vụ receiver; broker_admin chỉ được bac
 Thiết bị dùng username/password riêng, ACL chỉ cho phép gửi telemetry/ACK/status của chính nó và nhận command của chính nó.
 
 Chạy Setup để sinh secret/config, Start-IOT để chạy nền, Monitor để xem, Stop-IOT để dừng.
+Dashboard ParkFlow được backend phục vụ tại **http://127.0.0.1:8000/**; Swagger ở `/docs`.
+Frontend dùng HTML/CSS/ES modules cùng origin, không cần Node.js, bước build hoặc mở thêm cổng.
 Không cần cài service hệ thống. Firewall chỉ mở cổng MQTT cho executable của dự án từ LocalSubnet.
 Nếu đổi IP máy tính: dừng dịch vụ, Setup lại, nạp lại ESP32 và cập nhật firewall.
 Môi trường này chưa dùng Docker, TLS hoặc cloud; không mở cổng trực tiếp ra Internet.

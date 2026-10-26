@@ -25,11 +25,11 @@ def api(fake_broker):
         with M.Sessions() as db:
             device = db.scalar(select(M.Device).where(M.Device.code == "esp32_01"))
             did = device.id
-            for name, role in (("admin_v2", "admin"), ("operator_v2", "operator"), ("viewer_v2", "viewer"), ("stranger_v2", "viewer")):
+            for name, role in (("admin_v2", "admin"), ("operator_v2", "operator"), ("viewer_v2", "viewer"), ("stranger_v2", "operator")):
                 user = M.User(username=name, password_hash=M.hasher.hash("password-for-tests"), role=role)
                 db.add(user)
                 db.flush()
-                if role == "operator" or name == "viewer_v2":
+                if name in {"operator_v2", "viewer_v2"}:
                     db.add(DeviceGrant(device_id=did, user_id=user.id,
                         can_control=role == "operator", can_configure=role == "operator"))
             db.commit()
@@ -53,12 +53,12 @@ def test_scope_and_grant_revocation(api):
     assert client.get("/dashboard", headers=stranger).json()["capacity"] == 0
     assert client.get("/alerts", headers=stranger).json() == []
     assert client.get("/parking/events", headers=stranger).json() == []
-    assert client.get(f"/devices/{did}", headers=headers["viewer_v2"]).status_code == 200
+    assert client.get("/parking/overview", headers=headers["viewer_v2"]).json()["capacity"] == 2
     with M.Sessions() as db:
         viewer = db.scalar(select(M.User).where(M.User.username == "viewer_v2"))
         viewer_id = viewer.id
     assert client.delete(f"/devices/{did}/grants/{viewer_id}", headers=headers["admin_v2"]).status_code == 204
-    assert client.get(f"/devices/{did}", headers=headers["viewer_v2"]).status_code == 404
+    assert client.get("/parking/overview", headers=headers["viewer_v2"]).json()["capacity"] == 0
 
 
 def test_real_provisioning_contract_and_fail_closed(api, fake_broker):
@@ -119,7 +119,7 @@ def test_commands_require_scope_and_device_ack(api):
     runtime_tick()
     assert len(published) == 1
     assert published[0][1]["boot_id"] == "11111111"
-    assert client.get(f"/commands/{command_id}", headers=headers["viewer_v2"]).json()["status"] == "sent"
+    assert client.get(f"/commands/{command_id}", headers=headers["viewer_v2"]).status_code == 403
     acknowledge_command(AckMessage(device_id="other", command_id=command_id, status="succeeded",
                                    result={"report_interval_ms": 2000}), M.now())
     assert client.get(f"/commands/{command_id}", headers=headers["operator_v2"]).json()["status"] == "sent"
@@ -176,7 +176,7 @@ def test_time_search_export_statistics_and_events(api):
     client, headers, _, _ = api
     persist_reading(reading(0, 1), M.now() - timedelta(hours=2))
     persist_reading(reading(1, 0), M.now())
-    viewer = headers["viewer_v2"]
+    viewer = headers["operator_v2"]
     from_at = (M.now() - timedelta(hours=1)).isoformat()
     response = client.get("/telemetry", headers=viewer, params={"from_at": from_at})
     assert len(response.json()) == 1

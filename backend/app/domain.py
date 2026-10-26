@@ -1,6 +1,6 @@
 """Additive tables for device management; existing telemetry is preserved."""
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.main import Base, now
 
@@ -94,3 +94,37 @@ class DeviceCommand(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     target_boot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     uptime_deadline_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class LiveTelemetry(Base):
+    """One replaceable current reading per device, independent of retained history."""
+    __tablename__ = "live_telemetry"
+    device_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    accounted_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    history_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    history_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uptime_s: Mapped[int] = mapped_column(Integer)
+    levels: Mapped[list] = mapped_column(JSON)
+    operational: Mapped[bool] = mapped_column(Boolean, default=True)
+    boot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class HourlyOccupancy(Base):
+    """Seconds observed in each state, never percentages of sparse sample counts."""
+    __tablename__ = "hourly_occupancy"
+    device_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    slot_name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    hour: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    occupied_s: Mapped[float] = mapped_column(Float, default=0)
+    available_s: Mapped[float] = mapped_column(Float, default=0)
+    unknown_s: Mapped[float] = mapped_column(Float, default=0)
+
+
+class StorageState(Base):
+    __tablename__ = "storage_state"
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

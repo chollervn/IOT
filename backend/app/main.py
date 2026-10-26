@@ -15,6 +15,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, create_en
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from contextlib import asynccontextmanager
+from app.coordination import serialized
 
 
 def now():
@@ -93,7 +94,7 @@ class TelemetrySlot(Base):
     occupied: Mapped[bool] = mapped_column(Boolean)
 
 
-from app.domain import DeviceDetails, DeviceGrant, DeviceSlot, AlertDetails
+from app.domain import DeviceDetails, DeviceGrant, DeviceSlot, AlertDetails, LiveTelemetry
 
 
 def store_reading(item, received_at):
@@ -242,11 +243,20 @@ def telemetry_view(item, receiver, db):
 
 
 @app.get("/telemetry/latest")
-def latest_telemetry(device_id: str = "esp32_01", user: User = Depends(current_user),
+def latest_telemetry(device_id: str = "esp32_01", user: User = Depends(roles("admin", "operator")),
                      db: Session = Depends(session)):
     from app.domain_service import authorize
     if device_id != "simulator" or user.role != "admin":
         authorize(db, user, code=device_id)
+    live = db.get(LiveTelemetry, device_id)
+    if live:
+        from app.storage import live_view
+        from app.domain_service import connectivity, utc
+        device = db.scalar(select(Device).where(Device.code == device_id))
+        info = db.get(DeviceDetails, device.id) if device else None
+        fresh = (device and device.status == "active" and connectivity(device, info) == "online"
+                 and live.invalidated_at is None and utc(live.received_at) <= now() < utc(live.expires_at))
+        return live_view(live, fresh)
     item = db.scalar(select(Telemetry).where(Telemetry.device_code == device_id)
                      .order_by(Telemetry.id.desc()).limit(1))
     return telemetry_view(item, getattr(app.state, "mqtt_receiver", None), db) if item else None
@@ -255,7 +265,7 @@ def latest_telemetry(device_id: str = "esp32_01", user: User = Depends(current_u
 @app.get("/telemetry")
 def telemetry_history(device_id: str = "esp32_01", limit: int = 50, before_id: int | None = None,
                       from_at: datetime | None = None, to_at: datetime | None = None,
-                      user: User = Depends(current_user), db: Session = Depends(session)):
+                      user: User = Depends(roles("admin", "operator")), db: Session = Depends(session)):
     from app.domain_service import authorize
     from app.management import time_filter
     if device_id != "simulator" or user.role != "admin":
@@ -360,11 +370,13 @@ def device_view(item, db):
             "hardware": info.hardware if info else None, "location": info.location if info else "",
             "last_seen": utc(info.last_seen).isoformat() if info and info.last_seen else None,
             "fault": info.fault if info else None,
-            "broker_provisioned": bool(info and info.broker_provisioned)}
+            "broker_provisioned": bool(info and info.broker_provisioned),
+            "report_interval_ms": info.report_interval_ms if info else 1000,
+            "effective_offline_timeout_s": max(info.offline_timeout_s, info.report_interval_ms * 3 / 1000) if info else 10}
 
 
 @app.get("/devices")
-def devices(user: User = Depends(current_user), db: Session = Depends(session)):
+def devices(user: User = Depends(roles("admin", "operator")), db: Session = Depends(session)):
     from app.domain_service import visible_codes
     codes = visible_codes(db, user)
     query = select(Device)
@@ -374,6 +386,7 @@ def devices(user: User = Depends(current_user), db: Session = Depends(session)):
 
 
 @app.patch("/devices/{device_id}")
+@serialized
 def update_device(device_id: int, body: DeviceUpdate, user: User = Depends(roles("admin")), db: Session = Depends(session)):
     item = db.get(Device, device_id)
     if not item:
@@ -398,6 +411,9 @@ def update_device(device_id: int, body: DeviceUpdate, user: User = Depends(roles
                     DeviceCommand.device_id == item.id, DeviceCommand.status.in_(["queued", "sent"]))):
                 command.status, command.completed_at = "cancelled", now()
                 command.error = "Device lifecycle changed"
+    if body.status != item.status and body.status != "active":
+        from app.storage import invalidate
+        invalidate(db, item, now())
     item.status = body.status
     audit(db, user, f"devices.status:{device_id}:{body.status}")
     db.commit()
@@ -405,7 +421,7 @@ def update_device(device_id: int, body: DeviceUpdate, user: User = Depends(roles
 
 
 @app.get("/parking/slots")
-def slots(user: User = Depends(current_user), db: Session = Depends(session)):
+def slots(user: User = Depends(roles("admin", "operator")), db: Session = Depends(session)):
     return live_slot_views(db, user)
 
 
@@ -415,7 +431,7 @@ def live_slot_views(db, user=None):
 
 
 @app.get("/dashboard")
-def dashboard(user: User = Depends(current_user), db: Session = Depends(session)):
+def dashboard(user: User = Depends(roles("admin", "operator")), db: Session = Depends(session)):
     items = live_slot_views(db, user)
     return {"capacity": len(items), "occupied": sum(s["occupied"] is True for s in items),
             "available": sum(s["occupied"] is False for s in items),
@@ -424,7 +440,7 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(session)
 
 
 @app.get("/alerts")
-def alerts(limit: int = 50, active_only: bool = False, user: User = Depends(current_user), db: Session = Depends(session)):
+def alerts(limit: int = 50, active_only: bool = False, user: User = Depends(roles("admin", "operator")), db: Session = Depends(session)):
     if not 1 <= limit <= 200:
         raise HTTPException(422, "limit must be 1..200")
     from app.management import scoped_alerts
@@ -445,7 +461,6 @@ def acknowledge(alert_id: int, user: User = Depends(roles("admin", "operator")),
         raise HTTPException(404, "Alert not found")
     item.acknowledged = True
     audit(db, user, f"alerts.acknowledge:{alert_id}")
-    audit(db, user, f"alerts.acknowledge:{alert_id}")
     db.commit()
     return {"id": item.id, "acknowledged": True}
 
@@ -459,3 +474,8 @@ def logs(limit: int = 50, user: User = Depends(roles("admin")), db: Session = De
 
 from app.management import router as management_router
 app.include_router(management_router)
+from app.public_parking import router as parking_router
+app.include_router(parking_router)
+
+from app.web import install_frontend
+install_frontend(app)

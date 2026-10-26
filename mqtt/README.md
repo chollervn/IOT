@@ -47,8 +47,9 @@ Trong luc firmware thu ket noi lai broker, dong Serial co the tre hon 1 giay do 
 
 ## Backend va thu du lieu
 
-Mo `http://127.0.0.1:8000/docs`. Tai khoan `mqtt_admin` va mat khau ngau nhien nam trong
-`mqtt/runtime/THONG_TIN_DANG_NHAP.txt`. Goi `/auth/login`, dung access_token o nut Authorize.
+Mo dashboard **`http://127.0.0.1:8000/`**. Tai khoan `mqtt_admin` va mat khau ngau nhien nam trong
+`mqtt/runtime/THONG_TIN_DANG_NHAP.txt`. Giao dien chay cung backend, khong can cai Node.js.
+Swagger API van o `http://127.0.0.1:8000/docs`; goi `/auth/login`, dung access_token o nut Authorize.
 
 - `/health`: trang thai ket noi broker va dang ky topic (khong dong nghia ESP32 da gui du lieu).
 - `/telemetry/latest`: mau moi nhat cua `esp32_01`; `null` neu chua co mau that.
@@ -91,7 +92,9 @@ Enable-Firewall.cmd. Nen giu IP may tinh co dinh bang DHCP reservation tren rout
 `.tools/` chua ban portable Mosquitto 2.1.2 va 7-Zip 26.05 lay tu trang chinh thuc, khong cai dich vu he thong.
 `mqtt/runtime/` va `esp32_core/config.local.h` chua thong tin rieng, da loai khoi Git.
 MQTT TCP nay danh cho thu nghiem mang LAN tin cay; chua cau hinh TLS/truy cap Internet.
-Chua co chinh sach tu xoa lich su database.
+Backend da co chinh sach luu/don: mau thay doi hoac checkpoint 60 giay giu 3 ngay,
+su kien giu 90 ngay, tong hop thoi gian giu 365 ngay. Trang thai hien tai van cap nhat moi ban tin.
+Xem `../docs/STORAGE.md`.
 
 Backend v0.2 dung plugin Mosquitto Dynamic Security de cap/thu hoi tai khoan MQTT khi dang chay.
 `prepare_broker_v2.py` chuyen tu cau hinh file password/ACL cu va giu mat khau ESP32 hien tai.
