@@ -13,10 +13,10 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from app import main as M
 from app.broker_admin import BrokerUnavailable
-from app.domain import AlertDetails, DeviceCommand, DeviceDetails, DeviceGrant, DeviceSlot, ParkingEvent
+from app.domain import AlertDetails, DeviceCommand, DeviceDetails, DeviceGrant, DeviceSlot, ParkingEvent, HourlyOccupancy
 from app.domain_service import authorize, connectivity, details, receiver_ready, utc, visible_codes
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(M.roles("admin", "operator"))])
 
 
 def broker_call(method, *arguments):
@@ -84,6 +84,18 @@ def command_view(item):
 @router.get("/devices/{device_id}")
 def get_device(device_id: int, user: M.User = Depends(M.current_user), db=Depends(M.session)):
     return M.device_view(authorize(db, user, device_id=device_id), db)
+
+
+@router.get("/devices/{device_id}/permissions")
+def own_permissions(device_id: int, user: M.User = Depends(M.current_user), db=Depends(M.session)):
+    """Expose only the caller's effective rights, never another user's grants."""
+    device = authorize(db, user, device_id=device_id)
+    grant = db.get(DeviceGrant, (device.id, user.id))
+    admin = user.role == "admin"
+    operator = user.role == "operator" and grant is not None
+    return {"device_id": device.id, "can_read": True, "can_manage": admin,
+            "can_control": admin or bool(operator and grant.can_control),
+            "can_configure": admin or bool(operator and grant.can_configure)}
 
 
 @router.patch("/devices/{device_id}/metadata")
@@ -320,8 +332,40 @@ def statistics(device_id: str = "esp32_01", from_at: datetime | None = None,
     query = time_filter(query, M.Telemetry.received_at, from_at, to_at)
     rows = db.execute(query.group_by(bucket, M.TelemetrySlot.slot_name).order_by(bucket, M.TelemetrySlot.slot_name))
     return {"basis": "sample_count_not_parking_duration", "device_id": device_id,
+        "capture_policy": "change_or_60s_checkpoint",
         "buckets": [{"hour": hour, "slot": name, "samples": total, "occupied_samples": occupied,
             "occupied_sample_percent": round(100 * occupied / total, 2)} for hour, name, total, occupied in rows]}
+
+
+@router.get("/parking/utilization")
+def utilization(device_id: str = "esp32_01", from_at: datetime | None = None,
+                to_at: datetime | None = None, user=Depends(M.current_user), db=Depends(M.session)):
+    authorize(db, user, code=device_id)
+    end, start = utc(to_at or M.now()), utc(from_at or M.now() - timedelta(hours=24))
+    # Reuse strict timezone and range validation; hourly aggregates have hour granularity.
+    time_filter(select(HourlyOccupancy), HourlyOccupancy.hour, from_at, to_at)
+    if start >= end or end - start > timedelta(days=366):
+        raise HTTPException(422, "duration range must be ordered and at most 366 days")
+    start = start.replace(minute=0, second=0, microsecond=0)
+    end_hour = end.replace(minute=0, second=0, microsecond=0)
+    stop = end_hour if end == end_hour else end_hour + timedelta(hours=1)
+    rows = db.scalars(select(HourlyOccupancy).where(HourlyOccupancy.device_code == device_id,
+        HourlyOccupancy.hour >= start, HourlyOccupancy.hour < stop).order_by(HourlyOccupancy.hour, HourlyOccupancy.slot_name))
+    from app.storage import policy
+    return {"basis": "observed_duration", "range_mode": "whole_hours", "from_at": start.isoformat(),
+        "to_at": stop.isoformat(), "generated_at": M.now().isoformat(), "storage_policy": policy(),
+        "buckets": [{"hour": utc(r.hour).isoformat(), "slot": r.slot_name,
+            "occupied_seconds": round(r.occupied_s, 3), "available_seconds": round(r.available_s, 3),
+            "unknown_seconds": round(r.unknown_s, 3),
+            "observed_seconds": round(r.occupied_s + r.available_s, 3),
+            "occupied_observed_percent": round(100 * r.occupied_s / (r.occupied_s + r.available_s), 2)
+                if r.occupied_s + r.available_s else None} for r in rows]}
+
+
+@router.get("/storage/policy")
+def storage_policy(user=Depends(M.roles("admin"))):
+    from app.storage import policy
+    return policy()
 
 
 @router.get("/telemetry/export.csv")

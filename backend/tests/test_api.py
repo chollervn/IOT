@@ -41,7 +41,7 @@ def test_management_flow(fake_broker):
         for state in ("active", "revoked", "decommissioned"):
             assert client.patch(f"/devices/{did}", headers=headers, json={"status": state}).status_code == 200
         assert client.patch(f"/devices/{did}", headers=headers, json={"status": "active"}).status_code == 409
-        summary = client.get("/dashboard", headers=vh).json()
+        summary = client.get("/parking/overview", headers=vh).json()
         assert summary["unknown"] == 2 and summary["available"] == 0
         assert client.post(f"/devices/{did}/commands", headers=headers, json={"action": "ping"}).status_code == 409
         assert client.get("/audit-logs", headers=vh).status_code == 403
@@ -55,7 +55,7 @@ def test_management_flow(fake_broker):
 def test_telemetry_storage_auth_and_simulation_separation():
     with TestClient(app) as client:
         with Sessions() as db:
-            user = User(username="mqtt_viewer", password_hash=hasher.hash("viewer-mqtt-password"), role="viewer")
+            user = User(username="mqtt_viewer", password_hash=hasher.hash("viewer-mqtt-password"), role="operator")
             db.add(user)
             grant_physical(db, user)
             db.add(User(username="telemetry_admin", password_hash=hasher.hash("admin-mqtt-password"), role="admin"))
@@ -80,10 +80,10 @@ def test_telemetry_storage_auth_and_simulation_separation():
         assert client.get("/telemetry?limit=201", headers=headers).status_code == 422
 
 
-def test_two_slot_occupancy_and_freshness():
+def test_two_slot_occupancy_and_freshness(monkeypatch):
     with TestClient(app) as client:
         with Sessions() as db:
-            user = User(username="slots_viewer", password_hash=hasher.hash("viewer-slots-password"), role="viewer")
+            user = User(username="slots_viewer", password_hash=hasher.hash("viewer-slots-password"), role="operator")
             db.add(user)
             grant_physical(db, user)
             db.commit()
@@ -112,7 +112,9 @@ def test_two_slot_occupancy_and_freshness():
             receiver.connected = False
             assert client.get("/dashboard", headers=headers).json()["unknown"] == 2
             receiver.connected = True
-            store_reading(item, now() - timedelta(seconds=10))
+            from app import main as M
+            at = now() + timedelta(seconds=11)
+            monkeypatch.setattr(M, "now", lambda: at)
             assert client.get("/dashboard", headers=headers).json()["unknown"] == 2
             assert all(slot["occupied"] is None for slot in client.get("/parking/slots", headers=headers).json())
         finally:

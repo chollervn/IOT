@@ -84,6 +84,7 @@ class MqttReceiver:
         self.on_ack, self.on_status = on_ack, on_status
         self.connected = False
         self.subscribed = False
+        self._telemetry_log = {}
         self.host = host or os.getenv("MQTT_HOST", "127.0.0.1")
         self.port = int(port or os.getenv("MQTT_PORT", "1883"))
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
@@ -148,7 +149,11 @@ class MqttReceiver:
             logger.exception("Could not store MQTT reading")
             return
         if stored is not False:
-            logger.info(format_message(item, received_at))
+            levels = (item.do, item.do2, item.boot_id)
+            previous = self._telemetry_log.get(item.device_id)
+            if previous is None or previous[0] != levels or (received_at - previous[1]).total_seconds() >= 60:
+                logger.info(format_message(item, received_at))
+                self._telemetry_log[item.device_id] = (levels, received_at)
 
     def publish_command(self, code, payload):
         if not self.connected or not self.subscribed:

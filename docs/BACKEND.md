@@ -1,10 +1,24 @@
 # Backend v0.2
 
 Đọc OpenAPI tại `/docs`. Mọi API quản lý cần Bearer JWT, trừ `/health` và `/auth/login`.
-Tài khoản admin xem toàn hệ thống; operator/viewer chỉ xem các thiết bị có `DeviceGrant`.
+Tài khoản admin xem toàn hệ thống; operator xem các thiết bị có `DeviceGrant`. Viewer chỉ dùng `/parking/overview` theo grant và API tài khoản cá nhân, không truy cập API kỹ thuật.
 Viewer luôn không được gửi lệnh, kể cả khi vô tình được gán cờ điều khiển.
 Operator cần thêm `can_control` để ping, `can_configure` để cấu hình/rule. Chỉ admin quản lý tài khoản,
 onboarding, cấp quyền, vị trí và vòng đời. Không có đăng ký công khai tự cấp quyền admin.
+
+## Dashboard cùng origin
+
+`GET /` phục vụ dashboard ParkFlow trong `frontend/`; `/assets/` phục vụ JS/CSS/SVG nội bộ.
+Không cần Node.js, CDN hoặc cấu hình CORS để chạy giao diện. `/docs` vẫn dùng Swagger bình thường.
+Trang giao diện có CSP, chống nhúng iframe và `nosniff`; trang gốc/phản hồi xác thực dùng `no-store`.
+
+`GET /devices/{id}/permissions` trả quyền hiệu lực **của chính tài khoản đang gọi**:
+`can_read`, `can_manage`, `can_control`, `can_configure`. API không tiết lộ grant của người khác;
+thiết bị ngoài phạm vi trả 404. Đây là thông tin để giao diện bật/tắt thao tác, mọi API ghi vẫn kiểm tra quyền.
+
+Phản hồi thiết bị thêm `report_interval_ms` và `effective_offline_timeout_s` để giao diện hết hạn
+dữ liệu ngay cả giữa hai lần cập nhật. Giao diện truy vấn định kỳ 3 giây và hiển thị giờ UTC+7.
+Xem [hướng dẫn frontend](../frontend/README.md).
 
 ## Luồng thiết bị
 
@@ -90,3 +104,11 @@ GET `/devices/{id}/configuration` cho biết chu kỳ đã ghi nhận và yêu c
 from_at/to_at dùng ISO 8601 kèm múi giờ, ví dụ `2026-10-24T08:00:00+07:00`; client phải URL-encode dấu +.
 Dữ liệu nhạy cảm: tên tài khoản, mật khẩu băm, quyền thiết bị. Không thu biển số/ảnh/vị trí GPS cá nhân.
 Không commit `.env`, `config.local.h`, `mqtt/runtime`, database hoặc bản sao lưu. Triển khai local chưa có TLS/HTTPS.
+
+## Chính sách dữ liệu mới
+
+Xem [STORAGE.md](STORAGE.md). `live_telemetry` lưu trạng thái hiện tại độc lập với lịch sử.
+`/telemetry/latest` lấy trạng thái này; lịch sử/CSV chỉ chứa mẫu thay đổi hoặc checkpoint 60 giây, giữ 3 ngày.
+`/parking/utilization` trả thời gian quan sát theo giờ (có xe/trống/chưa xác định), làm tròn bộ lọc ra toàn bộ giờ giao nhau.
+`/telemetry/statistics` cũ vẫn đếm mẫu được lưu và không dùng làm tỷ lệ thời gian.
+`/storage/policy` dành cho admin. Viewer bị từ chối các API thiết bị, telemetry, cấu hình, lệnh và cảnh báo kỹ thuật bằng 403.

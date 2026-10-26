@@ -180,3 +180,35 @@ CREATE TABLE device_commands (
 );
 
 CREATE INDEX ix_device_commands_device_id ON device_commands (device_id);
+
+CREATE TABLE live_telemetry (
+	device_code VARCHAR(64) NOT NULL,
+	received_at DATETIME NOT NULL,
+	expires_at DATETIME NOT NULL,
+	accounted_until DATETIME NOT NULL,
+	invalidated_at DATETIME,
+	history_at DATETIME,
+	history_id INTEGER,
+	uptime_s INTEGER NOT NULL,
+	levels JSON NOT NULL,
+	operational BOOLEAN NOT NULL,
+	boot_id VARCHAR(32),
+	seq INTEGER,
+	PRIMARY KEY (device_code)
+);
+
+CREATE TABLE hourly_occupancy (
+	device_code VARCHAR(64) NOT NULL,
+	slot_name VARCHAR(32) NOT NULL,
+	hour DATETIME NOT NULL,
+	occupied_s FLOAT NOT NULL,
+	available_s FLOAT NOT NULL,
+	unknown_s FLOAT NOT NULL,
+	PRIMARY KEY (device_code, slot_name, hour)
+);
+
+CREATE TABLE storage_state (
+	"key" VARCHAR(32) NOT NULL,
+	at DATETIME NOT NULL,
+	PRIMARY KEY ("key")
+);
